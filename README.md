@@ -1,12 +1,12 @@
-# claude-code-toolbox
+# toolbox
 
-Small, self-contained tools for [Claude Code](https://claude.com/claude-code), built to fix real day-to-day frictions. Each tool lives in `tools/<name>/` with its own README and standalone install — take only what you need.
+Small, self-contained tools built to fix real day-to-day frictions. Each tool lives in `tools/<name>/` with its own README and standalone install — take only what you need.
 
 ## Tools
 
-| Tool | What it does |
-|---|---|
-| [limit-resume-concierge](tools/limit-resume-concierge/) | When you hit the 5h usage limit, it records which sessions were cut off mid-task and automatically wakes them up as soon as your quota comes back. |
+| Tool | For | What it does |
+|---|---|---|
+| [limit-resume-concierge](tools/limit-resume-concierge/) | [Claude Code](https://claude.com/claude-code) | When you hit the 5h usage limit, it records which sessions were cut off mid-task and automatically wakes them up as soon as your quota comes back. |
 
 ## Philosophy
 
@@ -16,8 +16,8 @@ Small, self-contained tools for [Claude Code](https://claude.com/claude-code), b
 
 ## General requirements
 
-- Claude Code (desktop app for the tools that use scheduled tasks).
 - macOS or Linux, `bash` and `jq`.
+- Anything tool-specific (e.g. the Claude Code desktop app) is listed in each tool's README.
 
 ## License
 
