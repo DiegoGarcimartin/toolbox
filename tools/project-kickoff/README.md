@@ -36,6 +36,10 @@ Three documents, split by how fast each one changes — which is what stops them
 
 Templates for the first three ship in [references/](references/) and are instantiated by the skill, so the output format doesn't drift between projects.
 
+## What it actually produces
+
+[**`examples/linkrot/`**](examples/) is a full harness as the skill produces it — the four documents above, filled in for a small CLI project. No source code, because session 1 doesn't write any; that's the whole idea. If you only read one file, read its [`STATE.md`](examples/linkrot/STATE.md) and ask whether you could pick the project up from it cold.
+
 ## Install
 
 Requirements: [Claude Code](https://claude.com/claude-code). No dependencies.
@@ -61,7 +65,7 @@ Copies the skill to `~/.claude/skills/project-kickoff/` so it's available in eve
 
 - **Greenfield only.** There's no retrofit mode yet for adopting the harness into a repo that already exists. You can run it manually against one, but the skill won't guide that path.
 - **The Stop hook nudges more than it writes.** Getting the agent to reliably auto-compose the session summary into `STATE.md`, rather than being prompted to, is still the weakest link.
-- **No worked example shipped.** The `references/` templates are skeletons, not a filled-in reference project. A skill is only as convincing as a real run of it.
+- **The worked example is illustrative, not archaeological.** [`examples/linkrot/`](examples/) shows the shape of the output faithfully, but it was written to demonstrate the skill rather than captured from a shipped product. Judge the structure, not the project.
 - **It costs a session.** That's the deal, and it's the wrong deal for anything you'll throw away — which is exactly what the tier gate at step 00 exists to catch.
 
 ## Lineage
