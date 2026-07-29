@@ -1,6 +1,6 @@
 ---
 name: project-kickoff
-description: Protocol for starting a new project with Claude Code the right way — harness before product. Use when the user starts a new project, says "new project", "kickoff", "start a repo", or asks to set up a repo from a spec or an idea.
+description: Protocol for starting a new project with Claude Code the right way — harness before product. Use when the user starts a new project or asks to set up a repo from a spec or an idea, in any language — "new project", "kickoff", "start a repo", "nuevo proyecto", "arranca/empieza un proyecto".
 ---
 
 # Project kickoff — harness first, product second
