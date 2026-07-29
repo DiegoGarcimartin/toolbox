@@ -24,8 +24,22 @@ input=$(cat)
 { echo "=== $(date -Iseconds) ==="; echo "$input"; } >> "$RAWLOG"
 tail -n 200 "$RAWLOG" > "$RAWLOG.tmp" 2>/dev/null && mv "$RAWLOG.tmp" "$RAWLOG"
 
-# Is this a usage-limit error? Look for patterns anywhere in the input JSON.
-if ! echo "$input" | grep -Eiq 'session limit|weekly limit|opus limit|usage limit|usage allowance|rate[_ ]?limit|quota|hit your|reset[s]?|resets at'; then
+# Is this a usage-limit error?
+#
+# Search ONLY the fields that can carry the reason, never the whole payload:
+# session_id, cwd and transcript_path are attacker-free but user-chosen, and a
+# session living in ~/dev/rate-limit-tool is not a quota failure. If the schema
+# ever changes and none of these fields exist, fall back to the whole blob —
+# a false positive costs one useless nudge, a false negative loses a session.
+haystack=$(echo "$input" | jq -r '
+  [.error?, .message?, .reason?, .stop_reason?, .last_assistant_message?]
+  | map(select(type == "string")) | join(" ")' 2>/dev/null)
+[ -z "$haystack" ] && haystack="$input"
+
+# Patterns are anchored to phrases, not to bare words: "quota" or "reset" on
+# their own also appear in ordinary prose Claude writes ("I checked your quota
+# dashboard"), which used to arm the concierge on unrelated failures.
+if ! echo "$haystack" | grep -Eiq '(session|weekly|opus|usage) limit|usage allowance|rate[_ -]?limit|limit reached|quota (exceeded|exhausted)|out of (quota|credits?)|resets?( at)? [0-9]{1,2}(:[0-9]{2})?[[:space:]]*(am|pm)'; then
   exit 0
 fi
 
