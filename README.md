@@ -33,9 +33,11 @@ Every tool documents its own uninstall, and none of them depend on another.
 - macOS or Linux, with `bash`. Some tools also need `jq` — each README states its own.
 - Anything tool-specific (e.g. the Claude Code desktop app) is listed in that tool's README.
 
-## Feedback
+## Feedback & contributions
 
-Bugs, ideas and "this didn't work on my setup" reports are welcome as [GitHub issues](https://github.com/DiegoGarcimartin/toolbox/issues). If a tool's *honest limitations* section is wrong or out of date, that's the most useful issue you can open.
+Bugs, ideas and "this didn't work on my setup" reports are welcome as [GitHub issues](https://github.com/DiegoGarcimartin/toolbox/issues). If a tool's *honest limitations* section is wrong or out of date, that's the most useful issue you can open. Pull requests are welcome too — especially ones that make a tool work on a setup I can't test.
+
+These tools are published because they might save someone else the same trouble, not as supported software. I read everything and reply when I can, which is not always fast. If you need a change today, fork it: that's what the MIT license is for, and it's quicker than waiting for me.
 
 ## License
 
