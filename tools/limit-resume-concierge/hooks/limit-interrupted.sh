@@ -37,9 +37,14 @@ if [ -n "$tp" ] && [ -f "$tp" ] && head -c 20000 "$tp" | grep -q 'recovery conci
   exit 0
 fi
 
-# Reset-time parsing: "resets 2:40pm" / "resets at 3pm" (local time).
+# Reset-time parsing: "resets 2:40pm" / "resets at 3pm" / "resets 2:40pm (Europe/Madrid)".
+#
+# The message states the hour in the timezone of the ACCOUNT, which is not
+# necessarily the timezone of the machine (travel, server in another region, a
+# laptop that never got its TZ set). When the message names the zone, we honour
+# it; otherwise we fall back to the machine's local time and hope they match.
 resets_at=""
-reset_raw=$(echo "$input" | grep -oiE 'resets( at)? [0-9]{1,2}(:[0-9]{2})?(am|pm)' | head -1)
+reset_raw=$(echo "$input" | grep -oiE 'resets( at)? [0-9]{1,2}(:[0-9]{2})?(am|pm)( \([A-Za-z]+/[A-Za-z_]+\))?' | head -1)
 if [ -n "$reset_raw" ]; then
   hm=$(echo "$reset_raw" | grep -oE '[0-9]{1,2}(:[0-9]{2})?')
   ampm=$(echo "$reset_raw" | grep -oiE '(am|pm)' | tr 'A-Z' 'a-z')
@@ -47,9 +52,22 @@ if [ -n "$reset_raw" ]; then
   h=$((10#$h)); m=$((10#$m))
   [ "$ampm" = "pm" ] && [ "$h" -ne 12 ] && h=$((h+12))
   [ "$ampm" = "am" ] && [ "$h" -eq 12 ] && h=0
-  # BSD date (macOS) and GNU date (Linux) build "today at h:m" with different flags.
-  target=$(date -j -v${h}H -v${m}M -v0S +%s 2>/dev/null) \
-    || target=$(date -d "today $(printf '%02d:%02d' "$h" "$m"):00" +%s 2>/dev/null)
+
+  # Zone named in the message, only if the system actually knows it.
+  tz=$(echo "$reset_raw" | grep -oE '\([A-Za-z]+/[A-Za-z_]+\)' | tr -d '()')
+  [ -n "$tz" ] && [ ! -f "/usr/share/zoneinfo/$tz" ] && tz=""
+
+  # BSD date (macOS) and GNU date (Linux) build "today at h:m" with different
+  # flags. Both emit an absolute epoch, so the comparison below is
+  # timezone-proof either way. NOTE: the TZ= prefix is applied only when a zone
+  # was named — an empty TZ="" would silently mean UTC, not "local".
+  if [ -n "$tz" ]; then
+    target=$(TZ="$tz" date -j -v${h}H -v${m}M -v0S +%s 2>/dev/null) \
+      || target=$(TZ="$tz" date -d "today $(printf '%02d:%02d' "$h" "$m"):00" +%s 2>/dev/null)
+  else
+    target=$(date -j -v${h}H -v${m}M -v0S +%s 2>/dev/null) \
+      || target=$(date -d "today $(printf '%02d:%02d' "$h" "$m"):00" +%s 2>/dev/null)
+  fi
   if [ -n "$target" ]; then
     now=$(date +%s)
     [ "$target" -le "$now" ] && target=$((target+86400))
