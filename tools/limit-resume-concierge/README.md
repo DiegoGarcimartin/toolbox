@@ -26,7 +26,7 @@ Three pieces:
 
 ## Install
 
-Requirements: macOS, Claude Code **desktop app** (uses its scheduled tasks and its session-management MCP), the **`claude` CLI on PATH** — the desktop app does [not bundle it](https://code.claude.com/docs/en/desktop-quickstart.md); the headless fallback shells out to it and the installer checks for it — plus `bash` and `jq`.
+Requirements: macOS, Claude Code **desktop app** (uses its scheduled tasks and its session-management MCP), the **`claude` CLI on PATH and logged in** — the desktop app does [not bundle it](https://code.claude.com/docs/en/desktop-quickstart.md) and desktop login does not carry over (run `/login` once in a terminal; `claude auth status` should say `loggedIn: true`); the headless fallback shells out to it and the installer checks both — plus `bash` and `jq`.
 
 ```bash
 ./install.sh

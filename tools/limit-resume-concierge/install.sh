@@ -13,6 +13,10 @@ if ! command -v claude >/dev/null; then
   echo "  The concierge's unattended delivery runs 'claude --resume' from Bash and"
   echo "  will fail without it. Install the CLI and re-check:"
   echo "  https://code.claude.com/docs/en/quickstart"
+elif [ "$(claude auth status 2>/dev/null | jq -r '.loggedIn' 2>/dev/null)" != "true" ]; then
+  echo "⚠ The 'claude' CLI is installed but NOT logged in — desktop-app login does"
+  echo "  not carry over to the CLI. Run 'claude' in a terminal and do /login once,"
+  echo "  then re-run this installer to confirm the check passes."
 fi
 
 CLAUDE_DIR="$HOME/.claude"
