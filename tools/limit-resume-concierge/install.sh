@@ -2,7 +2,8 @@
 # limit-resume-concierge installer.
 # 1. Copies the hook to ~/.claude/hooks/
 # 2. Adds the StopFailure hooks to ~/.claude/settings.json (with backup, idempotent)
-# 3. Prints the one remaining manual step: creating the scheduled task in the desktop app
+# 3. Pre-allows the permission rules unattended runs need (idempotent, announced)
+# 4. Prints the one remaining manual step: creating the scheduled task in the desktop app
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -20,10 +21,10 @@ echo "✓ Hook copied to $HOOK_DST"
 
 # 2. settings.json
 [ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
+[ -f "$SETTINGS.bak.limit-resume-concierge" ] || cp "$SETTINGS" "$SETTINGS.bak.limit-resume-concierge"
 if grep -q 'limit-interrupted.sh' "$SETTINGS"; then
   echo "✓ settings.json already has the StopFailure hook (left untouched)"
 else
-  cp "$SETTINGS" "$SETTINGS.bak.limit-resume-concierge"
   jq --arg cmd "$HOOK_DST" '
     .hooks //= {} | .hooks.StopFailure //= [] |
     .hooks.StopFailure += [{
@@ -38,7 +39,38 @@ else
   echo "✓ settings.json updated (backup at $SETTINGS.bak.limit-resume-concierge)"
 fi
 
-# 3. Concierge prompt with the real home path substituted in
+# 3. Permissions — the concierge runs UNATTENDED: any tool call that needs an
+# approval stalls the run forever AND blocks every future pass (the scheduler
+# won't fire while a run is stuck). Pre-allow the minimum it needs.
+# NOTE: MCP wildcard rules ("mcp__server__*") are NOT valid permission syntax
+# and match nothing — the bare server name is what allows all its tools.
+PERMS=(
+  "mcp__scheduled-tasks"      # self-disarm (update_scheduled_task)
+  "mcp__ccd_session_mgmt"     # list_sessions / send_message (when available)
+  "Bash(grep *)"              # manifest cleanup
+  "Bash(mv *)"                # manifest cleanup
+  "Bash(claude --resume *)"   # headless fallback resume
+)
+added=()
+for p in "${PERMS[@]}"; do
+  if ! jq -e --arg p "$p" '.permissions.allow // [] | index($p)' "$SETTINGS" >/dev/null; then
+    jq --arg p "$p" '.permissions //= {} | .permissions.allow //= [] | .permissions.allow += [$p]' \
+      "$SETTINGS" > "$SETTINGS.tmp"
+    mv "$SETTINGS.tmp" "$SETTINGS"
+    added+=("$p")
+  fi
+done
+if [ ${#added[@]} -gt 0 ]; then
+  echo "✓ Pre-allowed ${#added[@]} permission rule(s) in settings.json so unattended runs don't stall:"
+  printf '    %s\n' "${added[@]}"
+  echo "  Remove any of them if you'd rather approve by hand — but know that a run"
+  echo "  needing approval sits waiting in the app sidebar and NO further passes"
+  echo "  fire until you approve or kill it."
+else
+  echo "✓ Permission rules already present (left untouched)"
+fi
+
+# 4. Concierge prompt with the real home path substituted in
 PROMPT_OUT="$CLAUDE_DIR/limit-resume-concierge.prompt.md"
 sed "s|__HOME__|$HOME|g" concierge.SKILL.md > "$PROMPT_OUT"
 echo "✓ Concierge prompt generated at $PROMPT_OUT"
