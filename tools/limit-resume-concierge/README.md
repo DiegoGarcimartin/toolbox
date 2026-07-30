@@ -61,6 +61,7 @@ The concierge runs as a scheduled task: **nobody is at the keyboard when it fire
 - Only wakes **desktop app** sessions (it uses its session-management MCP and the shared transcripts under `~/.claude/projects/`).
 - On the direct path, manifest→session matching is by `cwd` (the manifest stores UUIDs while the session list uses `local_...` IDs): if you have several live sessions in the same directory, it wakes the most recent one. The headless fallback uses the UUID directly and has no such ambiguity.
 - The headless fallback continues the work outside the app UI: the transcript advances, but you won't see it typing live in the original session pane.
+- **CLI auth can silently rot on macOS.** After a CLI update or reinstall, the new binary may lose keychain access to its stored credentials — macOS denies silently and `claude auth status` reports `loggedIn: false` even though the keychain item is still there. It worked, then it didn't, and nobody touched anything. Fix once: run `claude` in a terminal and either click "Always Allow" on the keychain dialog or do `/login`. The installer's auth check catches this.
 
 ## Uninstall
 
