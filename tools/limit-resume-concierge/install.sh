@@ -8,6 +8,12 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 command -v jq >/dev/null || { echo "ERROR: jq is required (brew install jq / apt install jq)"; exit 1; }
+if ! command -v claude >/dev/null; then
+  echo "⚠ 'claude' CLI not found on PATH — the desktop app does NOT bundle it."
+  echo "  The concierge's unattended delivery runs 'claude --resume' from Bash and"
+  echo "  will fail without it. Install the CLI and re-check:"
+  echo "  https://code.claude.com/docs/en/quickstart"
+fi
 
 CLAUDE_DIR="$HOME/.claude"
 SETTINGS="$CLAUDE_DIR/settings.json"
@@ -81,9 +87,19 @@ cat <<'EOF'
 
 Open Claude Code (desktop app) and ask it:
 
-  "Create a scheduled task with the exact taskId 'limit-resume-concierge',
+  "Create a scheduled task NAMED EXACTLY 'limit-resume-concierge',
    cron */5 * * * *, INITIALLY DISABLED, whose prompt is the content of the
    file ~/.claude/limit-resume-concierge.prompt.md (read it and use it as-is)."
+
+The taskId is derived from the name (lowercase kebab-case), and the arming
+hook targets the id "limit-resume-concierge" — so the name must match. Verify:
+ask Claude to "list my scheduled tasks and show their taskIds"; if the id came
+out different, either recreate the task with the exact name or edit the
+"taskId" inside the StopFailure mcp_tool hook in ~/.claude/settings.json.
+
+Then click "Run now" on the task ONCE: with an empty manifest it just
+self-disarms, and any tool approval you grant during that run is stored on
+the task and auto-applied to every future unattended run.
 
 From then on: when you hit the usage limit, the hook records the interrupted
 sessions in ~/.claude/limit-interrupted.jsonl and arms the task; as soon as

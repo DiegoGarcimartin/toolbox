@@ -26,13 +26,18 @@ Three pieces:
 
 ## Install
 
-Requirements: Claude Code **desktop app** (uses its scheduled tasks and its session-management MCP), `bash`, `jq`. macOS or Linux.
+Requirements: Claude Code **desktop app** (uses its scheduled tasks and its session-management MCP), the **`claude` CLI on PATH** — the desktop app does [not bundle it](https://code.claude.com/docs/en/desktop-quickstart.md); the headless fallback shells out to it and the installer warns if it's missing — plus `bash` and `jq`. Tested on macOS; Windows should work through Git Bash (untested).
 
 ```bash
 ./install.sh
 ```
 
 The installer copies the hook, adds the configuration to `settings.json` (with backup, idempotent), **pre-allows the permission rules the concierge needs to run unattended** (announced on screen, see below), and prints the only manual step: asking Claude in the app to create the scheduled task (tasks cannot be created from outside the app — a platform limitation).
+
+Two gotchas on that manual step, both cheap to check:
+
+- **Name the task exactly `limit-resume-concierge`.** The app derives the taskId from the name (lowercase kebab-case), and the arming hook targets that exact id — a different name means the hook arms a task that doesn't exist, silently. Verify by asking Claude to list your scheduled tasks with their taskIds; on mismatch, recreate with the exact name or edit the `taskId` in the StopFailure `mcp_tool` hook in `~/.claude/settings.json`.
+- After creating the task, click **"Run now"** on it once: with an empty manifest it just self-disarms, and any tool approval you grant during that run is stored on the task and auto-applied to every future (unattended) run. Two minutes that de-risk the first real night.
 
 ## Unattended runs and permissions (read this)
 
