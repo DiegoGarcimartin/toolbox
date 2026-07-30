@@ -13,6 +13,10 @@
   <integer>300</integer>
   <key>RunAtLoad</key>
   <true/>
+  <!-- The sweep launches each resume detached and exits; without this,
+       launchd would kill the whole process group — resumes included. -->
+  <key>AbandonProcessGroup</key>
+  <true/>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
