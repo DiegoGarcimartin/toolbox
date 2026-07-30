@@ -26,7 +26,7 @@ Three pieces:
 
 ## Install
 
-Requirements: Claude Code **desktop app** (uses its scheduled tasks and its session-management MCP), the **`claude` CLI on PATH** — the desktop app does [not bundle it](https://code.claude.com/docs/en/desktop-quickstart.md); the headless fallback shells out to it and the installer warns if it's missing — plus `bash` and `jq`. Tested on macOS; Windows should work through Git Bash (untested).
+Requirements: macOS, Claude Code **desktop app** (uses its scheduled tasks and its session-management MCP), the **`claude` CLI on PATH** — the desktop app does [not bundle it](https://code.claude.com/docs/en/desktop-quickstart.md); the headless fallback shells out to it and the installer checks for it — plus `bash` and `jq`.
 
 ```bash
 ./install.sh
@@ -45,7 +45,7 @@ The concierge runs as a scheduled task: **nobody is at the keyboard when it fire
 
 1. **An unapproved tool call stalls the run forever — and blocks every future pass.** Scheduled runs honor `permissions.allow` from `~/.claude/settings.json`; anything not allowed prompts for approval, the prompt sits in the app sidebar, and the scheduler does not fire again while a run is stuck. We found a concierge run that had been hanging on one approval for 11 hours while the manifest filled up. That's why `install.sh` pre-allows the exact rules the concierge uses (`mcp__scheduled-tasks`, `mcp__ccd_session_mgmt`, `Bash(grep *)`, `Bash(mv *)`, `Bash(claude --resume *)`). If you remove them, the system degrades to "a visible approval request waiting for you" — acceptable, but it defeats the run-while-you-sleep purpose, and a stuck run must be killed/archived by hand before passes resume.
 2. **MCP wildcard permission rules are silently invalid.** `mcp__scheduled-tasks__*` matches *nothing*; the bare server name (`mcp__scheduled-tasks`) is what allows all its tools. Our own settings had the wildcard form — the allowlist looked complete and was doing nothing. Check yours.
-3. **`send_message` is hard-blocked in unattended sessions** — "Claude can't send cross-session messages from a session nobody is watching" ([desktop docs](https://code.claude.com/docs/en/desktop.md)). No permission rule fixes this; it's architectural. So the skill delivers the nudge via a fallback: `claude --resume <uuid> -p "…"` launched headless in the background, which continues the interrupted transcript directly. Best-effort — output lands in `~/.claude/concierge-resume-<uuid>.log`, and the resumed work runs non-interactively (tool calls not covered by your allowlist are denied rather than prompted there).
+3. **`send_message` is hard-blocked in unattended sessions** — "Claude can't send cross-session messages from a session nobody is watching" ([desktop docs](https://code.claude.com/docs/en/desktop.md)). No permission rule fixes this; it's architectural. So the skill delivers the nudge via a fallback: `claude --resume <uuid> -p "…"` launched headless in the background, which continues the interrupted transcript directly. Each resume writes its output to `~/.claude/concierge-resume-<uuid>.log`, and the resumed work runs non-interactively (tool calls not covered by your allowlist are denied rather than prompted there).
 
 ## Design decisions (learned from real failures)
 
