@@ -23,11 +23,12 @@ CLAUDE_DIR="$HOME/.claude"
 SETTINGS="$CLAUDE_DIR/settings.json"
 HOOK_DST="$CLAUDE_DIR/hooks/limit-interrupted.sh"
 
-# 1. Hook
+# 1. Hook + resume helper
 mkdir -p "$CLAUDE_DIR/hooks"
 cp hooks/limit-interrupted.sh "$HOOK_DST"
-chmod +x "$HOOK_DST"
-echo "✓ Hook copied to $HOOK_DST"
+cp hooks/concierge-resume.sh "$CLAUDE_DIR/hooks/concierge-resume.sh"
+chmod +x "$HOOK_DST" "$CLAUDE_DIR/hooks/concierge-resume.sh"
+echo "✓ Hook and resume helper copied to $CLAUDE_DIR/hooks/"
 
 # 2. settings.json
 [ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
@@ -59,7 +60,7 @@ PERMS=(
   "mcp__ccd_session_mgmt"     # list_sessions / send_message (when available)
   "Bash(grep *)"              # manifest cleanup
   "Bash(mv *)"                # manifest cleanup
-  "Bash(claude --resume *)"   # headless fallback resume
+  "Bash($CLAUDE_DIR/hooks/concierge-resume.sh *)"  # headless fallback resume
 )
 added=()
 for p in "${PERMS[@]}"; do

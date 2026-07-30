@@ -18,9 +18,9 @@ Strict procedure (crash-safe: clean the manifest SESSION BY SESSION, never all a
 4. For each pending session (maximum 5, most recent by logged_at), ONE BY ONE:
    a. Deliver this nudge — direct path first, fallback second:
       - Direct: send_message on the session-management MCP (the server may be named ccd_session_mgmt; if deferred, load it with ToolSearch). Its session IDs are "local_..." while the manifest stores UUIDs: map each entry to the most recent live session with the same cwd (list_sessions). EXPECTED FAILURE: in unattended runs send_message is unavailable by design ("Claude can't send cross-session messages from a session nobody is watching"). If the tool is missing or errors, don't retry — go straight to the fallback.
-      - Fallback (headless resume; uses the manifest UUID directly, no ID mapping needed):
-        nohup claude --resume <session_id> -p "<the message>" >> __HOME__/.claude/concierge-resume-<session_id>.log 2>&1 &
-        Launch it in the background and do NOT wait for it to finish. Best-effort: the work continues headlessly on the same transcript; the log file records what happened.
+      - Fallback (headless resume; uses the manifest UUID and cwd directly, no ID mapping needed):
+        __HOME__/.claude/hooks/concierge-resume.sh <session_id> "<cwd from the manifest entry>" "<the message>"
+        The helper cds to the session's cwd first (claude --resume only finds sessions of the current directory's project) and launches the resume detached — do NOT wait for the resumed work to finish. Each resume logs to __HOME__/.claude/concierge-resume-<session_id>.log.
       The message, in both paths: "[Automatic message from the limit concierge] The usage limit has recovered. Continue exactly where you left off with the task you had in progress when the limit hit. If nothing was in progress, reply briefly that there is nothing pending and do nothing else."
    b. IMMEDIATELY afterwards (before moving to the next session), remove that session_id's lines from the file:
         grep -v "that-session-id" file > file.tmp; mv file.tmp file
