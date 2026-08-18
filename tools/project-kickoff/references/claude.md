@@ -22,7 +22,8 @@
 - entrypoint: `[file]`
 
 ## Gotchas / environment
-- [the non-obvious thing that cost you an hour]
+<!-- Write each as symptom → cause + fix, so a future session recognizes instead of re-debugging. -->
+- [symptom you'll actually see] → [cause and fix — the thing that cost you an hour]
 - [missing account/key, rate limit, local quirk]
 
 ## Autonomy

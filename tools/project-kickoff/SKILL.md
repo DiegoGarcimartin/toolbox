@@ -47,7 +47,7 @@ Before building anything, list every account, key or browser-step only the human
 
 Everything that lets someone resume the project cold MUST be versioned IN the repo. The test: **could a stranger become productive in under 30 minutes from the repo alone?**
 
-- `CLAUDE.md` — distill the spec into ~30 token-lean lines: hard rules, priority order, commands, layout pointers ("don't re-explore"), environment gaps. Loads in EVERY future session; makes future prompts two lines long. End it with the standing rule: "at session end, update STATE.md (done / in-flight / next step)." Skeleton: `references/claude.md`.
+- `CLAUDE.md` — distill the spec into ~30 token-lean lines: hard rules, priority order, commands, layout pointers ("don't re-explore"), environment gaps. Loads in EVERY future session; makes future prompts two lines long. Operational rules carry the symptom they prevent ("after adding a dep, recreate containers — the symptom is MODULE_NOT_FOUND for a package that's plainly installed"): debugging knowledge becomes repo knowledge instead of re-discovery. End it with the standing rule: "at session end, update STATE.md (done / in-flight / next step)." Skeleton: `references/claude.md`.
 - `STATE.md` (repo root) — the living resume point: current state, what's in flight, the ONE next step, and a 3-line last-session summary. This is what makes cold-resume trivial for you OR anyone else. Versioned, kept current by the hook below. Skeleton: `references/state.md`.
 - `README.md` + `.env.example` — the human on-ramp, PRODUCT-FIRST (CLAUDE.md is the agent's runbook): what it is / who for / value, THEN run in 5 min; credentials from step 1 persisted as `.env.example`. Skeleton: `references/readme.md`.
 - `.claude/agents/` — persist the roles that hold a stable quality bar:
@@ -56,8 +56,13 @@ Everything that lets someone resume the project cold MUST be versioned IN the re
 - `.claude/settings.json` Stop hook — at session end, update or append to STATE.md so resumability never depends on anyone remembering. A forcing function, not a reminder.
 - **CI from commit 1** with every quality gate the spec names (lint, typecheck, tests, domain evals). Red until earned green. Nothing merges red.
 - **Testing floor** (don't re-decide it per project): if the product has a web UI, a browser smoke suite exists from v0 — boots, main route renders, core flow completes — and runs pre-push and in CI. E2E depth only for flows the spec marks business-critical; pure style or layout changes need smoke only. If DOM selectors change, tests update in the same commit. Non-web products: the cheapest equivalent end-to-end check (CLI run on a fixture, API golden test).
+  - **The inner dev loop is a fast unit layer with the edges stubbed** (external APIs, DB): runs in seconds with nothing booted, exercises the domain rules. E2E is a gate, never the inner loop — if verifying a change means starting the stack, iteration speed dies and verification gets skipped.
+  - **Tests run against an isolated environment** (own DB/instance/test project), never against dev data. Test-only routes or resets are gated behind an env var that only the test environment sets.
+  - **External API → a mock that serves the SAME fixture files the unit tests read**, so unit and E2E can't drift. Fixtures are hand-authored and each one pins a named domain edge case — mine these from the user: enumerating the weird cases is where their domain knowledge feeds the tests.
+  - **Git hooks live versioned in `.githooks/`** (`git config core.hooksPath .githooks`, documented as an install command), with a documented bypass. Never unversioned `.git/hooks`, never husky — a hook that doesn't survive a fresh clone fails the 30-minute-stranger test.
 - `docs/decisions.md` (append-only log: decision, why, alternatives) + `docs/backlog.md` (scope + status).
-- `.gitignore`: ignore local-only and worktree paths, but VERSION `.claude/agents/`, `CLAUDE.md`, `STATE.md`, `README.md` and `.claude/settings.json`.
+- `docs/plans/` for multi-phase features (session 2+; kickoff just creates the folder + convention note): one folder per plan, phase files named `todo-*.md` → `doing-*.md` → `done-*.md`. Status lives in the filename — `ls` shows progress cold; one `doing-` at a time. Closing a plan requires a 5-line completion summary (shipped / changed vs plan / lessons) and updating CLAUDE.md if architecture changed. That's the whole protocol — no approval gates, the autonomy clause governs.
+- `.gitignore`: ignore local-only and worktree paths, but VERSION `.claude/agents/`, `.claude/skills/`, `CLAUDE.md`, `STATE.md`, `README.md` and `.claude/settings.json`.
 
 ## 3. Design before build (user-facing products)
 
@@ -66,10 +71,19 @@ If the product has users: personas, UX flows and design tokens FIRST, evaluated 
 ## 4. Build by risk order, verify per milestone
 
 - Order layers by invariant-criticality: the riskiest, most-testable core first; UI last.
+- Every data shape is defined ONCE and every other layer derives or infers it (schema → types → client). A hand-written duplicate of a shape that exists elsewhere is a bug even while it still matches — duplicates drift silently and no one reviews the drift.
 - Every layer: tests green before the next layer starts.
 - Supervisors review AT EACH MILESTONE, not once at the end — a milestone veto is 4 fixes; an end-of-build veto is 30.
 - Every rule the user cares about must have a check that runs WITHOUT the user (tests, evals, CI gates). Autonomy = self-verification.
 
-## 5. The user's role from session 2 on
+## 5. Shipped from commit 1 (products with a deploy target)
+
+Launching is the repo's normal state, not an event:
+
+- The walking skeleton deploys to a real public URL from commit 1. Env vars, domains and build differences surface on day 1 against a hello-world — not the night before showing someone. From then on, merge to main = deployed.
+- **Telemetry before the first shared URL**: error capture + basic analytics wired into the harness. A launch you can't measure didn't happen — you learn neither that it broke nor that nobody came.
+- **Post-deploy smoke against the production URL** (loads + core flow responds), run automatically after each deploy. Sharing a link must not require opening it first "just in case".
+
+## 6. The user's role from session 2 on
 
 Their messages should be: scope decisions, domain knowledge, taste calls, credentials. If they have to repeat a rule, that's a harness bug — move the rule into CLAUDE.md, an agent, or a test immediately.
