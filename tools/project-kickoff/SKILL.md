@@ -59,9 +59,7 @@ Everything that lets someone resume the project cold MUST be versioned IN the re
   - **The inner dev loop is a fast unit layer with the edges stubbed** (external APIs, DB): runs in seconds with nothing booted, exercises the domain rules. E2E is a gate, never the inner loop — if verifying a change means starting the stack, iteration speed dies and verification gets skipped.
   - **Tests run against an isolated environment** (own DB/instance/test project), never against dev data. Test-only routes or resets are gated behind an env var that only the test environment sets.
   - **External API → a mock that serves the SAME fixture files the unit tests read**, so unit and E2E can't drift. Fixtures are hand-authored and each one pins a named domain edge case — mine these from the user: enumerating the weird cases is where their domain knowledge feeds the tests.
-  - **Git hooks live versioned in `.githooks/`** (`git config core.hooksPath .githooks`, documented as an install command), with a documented bypass. Never unversioned `.git/hooks`, never husky — a hook that doesn't survive a fresh clone fails the 30-minute-stranger test.
 - `docs/decisions.md` (append-only log: decision, why, alternatives) + `docs/backlog.md` (scope + status).
-- `docs/plans/` for multi-phase features (session 2+; kickoff just creates the folder + convention note): one folder per plan, phase files named `todo-*.md` → `doing-*.md` → `done-*.md`. Status lives in the filename — `ls` shows progress cold; one `doing-` at a time. Closing a plan requires a 5-line completion summary (shipped / changed vs plan / lessons) and updating CLAUDE.md if architecture changed. That's the whole protocol — no approval gates, the autonomy clause governs.
 - `.gitignore`: ignore local-only and worktree paths, but VERSION `.claude/agents/`, `.claude/skills/`, `CLAUDE.md`, `STATE.md`, `README.md` and `.claude/settings.json`.
 
 ## 3. Design before build (user-facing products)
