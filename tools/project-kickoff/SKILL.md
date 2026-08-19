@@ -76,14 +76,6 @@ If the product has users: personas, UX flows and design tokens FIRST, evaluated 
 - Supervisors review AT EACH MILESTONE, not once at the end — a milestone veto is 4 fixes; an end-of-build veto is 30.
 - Every rule the user cares about must have a check that runs WITHOUT the user (tests, evals, CI gates). Autonomy = self-verification.
 
-## 5. Shipped from commit 1 (products with a deploy target)
-
-Launching is the repo's normal state, not an event:
-
-- The walking skeleton deploys to a real public URL from commit 1. Env vars, domains and build differences surface on day 1 against a hello-world — not the night before showing someone. From then on, merge to main = deployed.
-- **Telemetry before the first shared URL**: error capture + basic analytics wired into the harness. A launch you can't measure didn't happen — you learn neither that it broke nor that nobody came.
-- **Post-deploy smoke against the production URL** (loads + core flow responds), run automatically after each deploy. Sharing a link must not require opening it first "just in case".
-
-## 6. The user's role from session 2 on
+## 5. The user's role from session 2 on
 
 Their messages should be: scope decisions, domain knowledge, taste calls, credentials. If they have to repeat a rule, that's a harness bug — move the rule into CLAUDE.md, an agent, or a test immediately.
