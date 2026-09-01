@@ -17,7 +17,12 @@ MSG="[Automatic message from the limit concierge] The usage limit has recovered.
 
 log() { echo "$(date -Iseconds) $*" >> "$SWEEPLOG"; }
 
-# Single-instance guard: resumed work can outlive one 5-min tick.
+# Single-instance guard. A sweep takes seconds (resumes are launched detached),
+# so a lock older than 10 min is a crash/reboot leftover: clear it instead of
+# skipping every tick forever.
+if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
+  rmdir "$LOCK" 2>/dev/null && log "cleared stale lock left by an interrupted sweep"
+fi
 if ! mkdir "$LOCK" 2>/dev/null; then
   log "another sweep is still running; skipping this tick"
   exit 0
@@ -35,12 +40,15 @@ if grep -q '"session_id":"test-' "$MANIFEST" 2>/dev/null; then
 fi
 
 # If the manifest carries a reset time that is still in the future, don't even
-# probe: quota is known to be exhausted until then. (Free early exit.)
+# probe: quota is known to be exhausted until then. (Free early exit.) Only
+# trusted up to 5h ahead — the limit window is 5h, so anything further is a
+# mis-parsed timezone and would wrongly hold every pending session.
 latest_reset=$(jq -rs '[.[] | .resets_at // empty] | max // empty' "$MANIFEST" 2>/dev/null)
 if [ -n "$latest_reset" ]; then
   reset_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S" "${latest_reset%%[+Z]*}" +%s 2>/dev/null \
     || date -d "$latest_reset" +%s 2>/dev/null)
-  if [ -n "$reset_epoch" ] && [ "$reset_epoch" -gt "$(date +%s)" ]; then
+  now=$(date +%s)
+  if [ -n "$reset_epoch" ] && [ "$reset_epoch" -gt "$now" ] && [ $((reset_epoch - now)) -le 18000 ]; then
     log "reset expected at $latest_reset; waiting"
     exit 0
   fi
@@ -48,8 +56,9 @@ fi
 
 # Quota probe: one minimal headless call. While the limit is active this call
 # is rejected (and costs nothing); the sweep retries on the next tick.
-# CONCIERGE_TEST_PROBE lets tests inject a canned probe result.
-probe=${CONCIERGE_TEST_PROBE:-$(claude -p "Reply with exactly: ok" --output-format json 2>/dev/null | tail -1)}
+# The prompt carries a marker so the StopFailure hook never records the probe
+# itself. CONCIERGE_TEST_PROBE lets tests inject a canned probe result.
+probe=${CONCIERGE_TEST_PROBE:-$(claude -p "[limit-resume-concierge probe] Reply with exactly: ok" --output-format json 2>/dev/null | tail -1)}
 AUTH_MARK="$HOME/.claude/concierge-auth-alerted"
 if ! echo "$probe" | jq -e '.is_error == false' >/dev/null 2>&1; then
   # A logged-out CLI rejects the probe exactly like an exhausted quota, but no
@@ -71,10 +80,20 @@ rm -f "$AUTH_MARK"
 # the StopFailure hook; test- entries are dropped here without resuming).
 # Order per session: launch the resume, THEN remove its lines — if the script
 # dies mid-pass, everything already delivered is clean and won't be re-sent.
-drop_sid() { grep -v "\"session_id\":\"$1\"" "$MANIFEST" > "$MANIFEST.tmp"; mv "$MANIFEST.tmp" "$MANIFEST"; }
+# $2 is the head line being processed: if the literal match fails to remove it
+# (non-compact JSON, e.g. hand-edited), drop it by position so the loop can't spin.
+drop_sid() {
+  grep -v "\"session_id\":\"$1\"" "$MANIFEST" > "$MANIFEST.tmp"; mv "$MANIFEST.tmp" "$MANIFEST"
+  if [ "$(head -n1 "$MANIFEST" 2>/dev/null)" = "$2" ]; then
+    tail -n +2 "$MANIFEST" > "$MANIFEST.tmp"; mv "$MANIFEST.tmp" "$MANIFEST"
+    log "dropped head line by position (literal match failed for $1)"
+  fi
+}
 
-processed=0
+processed=0; iterations=0
 while [ "$processed" -lt 5 ]; do
+  iterations=$((iterations+1))
+  if [ "$iterations" -gt 50 ]; then log "loop guard tripped; leaving the rest for the next tick"; break; fi
   line=$(head -n1 "$MANIFEST" 2>/dev/null)
   [ -n "$line" ] || break
   sid=$(echo "$line" | jq -r '.session_id // empty' 2>/dev/null)
@@ -85,11 +104,11 @@ while [ "$processed" -lt 5 ]; do
     log "dropped malformed manifest line"
     continue
   fi
-  case "$sid" in test-*) drop_sid "$sid"; log "dropped test entry $sid"; continue;; esac
+  case "$sid" in test-*) drop_sid "$sid" "$line"; log "dropped test entry $sid"; continue;; esac
 
   log "resuming $sid (cwd: $dir)"
   "$HOME/.claude/hooks/concierge-resume.sh" "$sid" "$dir" "$MSG"
-  drop_sid "$sid"
+  drop_sid "$sid" "$line"
   processed=$((processed+1))
 done
 

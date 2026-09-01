@@ -13,8 +13,9 @@
 #    interrupted subagent).
 #  - resets_at: if the payload carries the reset time as text ("resets 2:40pm"),
 #    it is parsed to ISO and stored in the entry and in ~/.claude/limit-reset-at.
-#  - Self-guard: the concierge's own runs that die from the limit are not
-#    recorded (prevents the concierge from trying to "resume" itself).
+#  - Self-guard: the sweep's own quota probes are not recorded (the probe is
+#    the one session that dies from the limit by design, every tick). Resumed
+#    work sessions that hit the limit again ARE recorded: they have work pending.
 MANIFEST="$HOME/.claude/limit-interrupted.jsonl"
 RAWLOG="$HOME/.claude/stopfailure-raw.log"
 RESETFILE="$HOME/.claude/limit-reset-at"
@@ -46,8 +47,8 @@ fi
 sid=$(echo "$input" | jq -r '.session_id // empty' 2>/dev/null)
 tp=$(echo "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
 
-# Self-guard: if the transcript belongs to a concierge run, don't record it.
-if [ -n "$tp" ] && [ -f "$tp" ] && head -c 20000 "$tp" | grep -q 'recovery concierge'; then
+# Self-guard: the sweep's probe prompt carries this marker (see concierge-sweep.sh).
+if [ -n "$tp" ] && [ -f "$tp" ] && head -c 20000 "$tp" | grep -q 'limit-resume-concierge probe'; then
   exit 0
 fi
 
@@ -58,7 +59,7 @@ fi
 # laptop that never got its TZ set). When the message names the zone, we honour
 # it; otherwise we fall back to the machine's local time and hope they match.
 resets_at=""
-reset_raw=$(echo "$input" | grep -oiE 'resets( at)? [0-9]{1,2}(:[0-9]{2})?(am|pm)( \([A-Za-z]+/[A-Za-z_]+\))?' | head -1)
+reset_raw=$(echo "$haystack" | grep -oiE 'resets( at)? [0-9]{1,2}(:[0-9]{2})?[[:space:]]*(am|pm)( \([A-Za-z]+/[A-Za-z_]+\))?' | head -1)
 if [ -n "$reset_raw" ]; then
   hm=$(echo "$reset_raw" | grep -oE '[0-9]{1,2}(:[0-9]{2})?')
   ampm=$(echo "$reset_raw" | grep -oiE '(am|pm)' | tr 'A-Z' 'a-z')

@@ -32,7 +32,7 @@ Requirements: macOS, Claude Code **desktop app** (its sessions are what get reco
 ./install.sh
 ```
 
-That's the whole install: scripts copied, hook configured, launchd agent loaded. No manual steps, no permission rules, no scheduled tasks to create. The installer verifies the CLI and its login, and prints a self-test you can run immediately.
+That's the whole install: scripts copied, hook configured, launchd agent loaded. No manual steps, no permission rules, no scheduled tasks to create. The installer verifies the CLI and its login, and prints a self-test you can run immediately. `./test.sh` runs the tool's own tests in a sandboxed `$HOME` (no real API call).
 
 ## Why launchd and not the app's scheduled tasks
 
@@ -48,17 +48,20 @@ The lesson generalizes: **keep the LLM out of the recovery loop**. Everything th
 
 - **Deliver first, clean immediately after, session by session.** If the sweep dies mid-pass, everything already delivered is gone from the manifest and won't be re-sent; everything else survives for the next tick.
 - **Dedupe in the hook.** A single limit event fires one StopFailure per interrupted subagent: one session generated 316 lines. The hook won't record a session already in the manifest.
-- **Self-guard.** Concierge-related runs are never recorded (prevents resume loops).
+- **Self-guard.** The sweep's own quota probe is the one session that dies from the limit by design, every tick; its prompt carries a marker and the hook never records it. A resumed work session that hits the limit again *is* recorded again, on purpose: it still has work pending. (An earlier version checked for a string the sweep never wrote, so the guard was dead code — caught in review, covered by `test.sh` now.)
 - **Non-quota failures are ignored.** Auth, billing, invalid_request… no point reviving those: they'd fail again.
 - **Resume from the session's own cwd.** `claude --resume` only finds sessions of the current directory's project — the manifest records each session's cwd precisely so the sweep can `cd` there first (found live in a drill: resuming from anywhere else fails with "No conversation found").
-- **Quota gating without spending.** The sweep exits free while the manifest's parsed reset time is still in the future; after that, a minimal probe call gates the pass — while the limit is active the probe is rejected at no cost and the sweep just retries next tick.
+- **Quota gating without spending.** The sweep exits free while the manifest's parsed reset time is still in the future — but only if that time is within 5h, the length of the limit window. A reset further out is a mis-parsed timezone, and trusting it would hold every pending session for up to a day; the sweep ignores it and probes instead. After the gate, a minimal probe call decides the pass — while the limit is active the probe is rejected at no cost and the sweep just retries next tick.
+- **Locks expire.** The single-instance lock is a directory; a crash or reboot mid-sweep used to leave it behind and every later tick exited with "another sweep is still running", forever, silently. A sweep takes seconds, so a lock older than 10 minutes is now treated as stale and cleared.
+- **The manifest loop cannot spin.** Lines are removed by literal match on the compact JSON the hook writes; a hand-edited line with different spacing could never be removed and the pass looped on it at full CPU while holding the lock. Now a line that survives its own removal is dropped by position, and the pass gives up after 50 iterations.
 - **CLI auth can silently rot on macOS.** After a CLI update, the binary can lose keychain access to its stored credentials: it worked, then it didn't, and nobody touched anything. To the quota probe this looks exactly like an exhausted limit, and one expired login cost four hours of silent retries before anyone noticed. The sweep now tells the two apart: on an auth failure it logs `CLI logged out` and sends one macOS notification per incident (not one per tick). Fix: run `claude` in a terminal and `/login` once — the next tick resumes everything pending. The installer checks the login too.
 
 ## Honest limitations
 
 - **The wake-up lands within ~5 minutes of quota returning**, not the very second (launchd ticks every 5 min).
-- **The reset hour is only as good as the zone in the message.** Claude states the reset in the *account's* timezone; when the message names it (`(Europe/Madrid)`) the hook converts from that zone, otherwise it assumes the machine's local time. The sweep only uses it to skip known-dead ticks, and the quota probe re-checks reality anyway.
+- **The reset hour is only as good as the zone in the message.** Claude states the reset in the *account's* timezone; when the message names it (`(Europe/Madrid)`) the hook converts from that zone, otherwise it assumes the machine's local time. The sweep only uses it to skip ticks while the reset is less than 5h away; a time further out is ignored and the quota probe decides instead. A zone mismatch can therefore cost at most one 5h window of free skips, never a day.
 - The resumed work continues **headless, outside the app UI**: the transcript advances (you'll see it when you reopen the session), with a per-session log in `~/.claude/concierge-resume-<uuid>.log`. Tool calls not covered by your allowlist are denied rather than prompted there.
+- **A resume that fails is not retried.** The resume is launched detached and its manifest line is removed at once (that is what makes the pass crash-safe). If `claude --resume` then fails — session pruned, cwd deleted or renamed, CLI updated mid-flight — the only trace is the error in that session's `~/.claude/concierge-resume-<uuid>.log`; the sweep log just says `resuming`. Reopen the session from the app in that case.
 - The Mac must be awake (plugged in, lid open or caffeinated). The desktop app, however, can be closed.
 - Sweeps handle 5 sessions per tick; more simply roll over to the next tick.
 
@@ -68,7 +71,8 @@ The lesson generalizes: **keep the LLM out of the recovery loop**. Everything th
 launchctl unload ~/Library/LaunchAgents/com.limit-resume-concierge.plist
 rm ~/Library/LaunchAgents/com.limit-resume-concierge.plist
 rm ~/.claude/hooks/limit-interrupted.sh ~/.claude/hooks/concierge-resume.sh ~/.claude/hooks/concierge-sweep.sh
-rm -f ~/.claude/limit-interrupted.jsonl ~/.claude/limit-reset-at ~/.claude/stopfailure-raw.log ~/.claude/concierge-sweep.log ~/.claude/concierge-auth-alerted
+rm -f ~/.claude/limit-interrupted.jsonl ~/.claude/limit-reset-at ~/.claude/stopfailure-raw.log ~/.claude/concierge-sweep.log ~/.claude/concierge-auth-alerted ~/.claude/concierge-launchd.err.log ~/.claude/concierge-resume-*.log
+rm -rf ~/.claude/limit-resume-concierge.lock
 ```
 
-Then remove the `StopFailure` block the installer added in `~/.claude/settings.json` (or restore the `.bak`). If you're coming from v1, also delete the `limit-resume-concierge` scheduled task in the app and the five v1 `permissions.allow` rules.
+Then remove the `StopFailure` block the installer added in `~/.claude/settings.json` (or restore `~/.claude/settings.json.bak.limit-resume-concierge`). If you're coming from v1, also delete the `limit-resume-concierge` scheduled task in the app and the five v1 `permissions.allow` rules.
