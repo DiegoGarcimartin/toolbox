@@ -48,11 +48,24 @@ fi
 
 # Quota probe: one minimal headless call. While the limit is active this call
 # is rejected (and costs nothing); the sweep retries on the next tick.
-probe=$(claude -p "Reply with exactly: ok" --output-format json 2>/dev/null | tail -1)
+# CONCIERGE_TEST_PROBE lets tests inject a canned probe result.
+probe=${CONCIERGE_TEST_PROBE:-$(claude -p "Reply with exactly: ok" --output-format json 2>/dev/null | tail -1)}
+AUTH_MARK="$HOME/.claude/concierge-auth-alerted"
 if ! echo "$probe" | jq -e '.is_error == false' >/dev/null 2>&1; then
-  log "quota not back yet (probe rejected); will retry next tick"
+  # A logged-out CLI rejects the probe exactly like an exhausted quota, but no
+  # amount of waiting fixes it — tell the user once instead of retrying silently.
+  if echo "$probe" | jq -r '.result // empty' 2>/dev/null | grep -qiE 'authenticat|oauth|api key'; then
+    log "CLI logged out, not a quota wait: $(echo "$probe" | jq -r '.result')"
+    if [ ! -e "$AUTH_MARK" ]; then
+      : > "$AUTH_MARK"
+      osascript -e 'display notification "The claude CLI is logged out; interrupted sessions cannot resume. Run claude in a terminal and /login once." with title "limit-resume-concierge"' 2>/dev/null
+    fi
+  else
+    log "quota not back yet (probe rejected); will retry next tick"
+  fi
   exit 0
 fi
+rm -f "$AUTH_MARK"
 
 # Sweep: up to 5 sessions per pass (self-guard and dedupe already happen in
 # the StopFailure hook; test- entries are dropped here without resuming).

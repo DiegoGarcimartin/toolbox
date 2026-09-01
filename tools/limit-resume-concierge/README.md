@@ -52,7 +52,7 @@ The lesson generalizes: **keep the LLM out of the recovery loop**. Everything th
 - **Non-quota failures are ignored.** Auth, billing, invalid_request… no point reviving those: they'd fail again.
 - **Resume from the session's own cwd.** `claude --resume` only finds sessions of the current directory's project — the manifest records each session's cwd precisely so the sweep can `cd` there first (found live in a drill: resuming from anywhere else fails with "No conversation found").
 - **Quota gating without spending.** The sweep exits free while the manifest's parsed reset time is still in the future; after that, a minimal probe call gates the pass — while the limit is active the probe is rejected at no cost and the sweep just retries next tick.
-- **CLI auth can silently rot on macOS.** After a CLI update, the binary can lose keychain access to its stored credentials: it worked, then it didn't, and nobody touched anything. `claude auth status` says `loggedIn: false`; run `claude` and re-`/login` once. The installer checks this.
+- **CLI auth can silently rot on macOS.** After a CLI update, the binary can lose keychain access to its stored credentials: it worked, then it didn't, and nobody touched anything. To the quota probe this looks exactly like an exhausted limit, and one expired login cost four hours of silent retries before anyone noticed. The sweep now tells the two apart: on an auth failure it logs `CLI logged out` and sends one macOS notification per incident (not one per tick). Fix: run `claude` in a terminal and `/login` once — the next tick resumes everything pending. The installer checks the login too.
 
 ## Honest limitations
 
@@ -68,7 +68,7 @@ The lesson generalizes: **keep the LLM out of the recovery loop**. Everything th
 launchctl unload ~/Library/LaunchAgents/com.limit-resume-concierge.plist
 rm ~/Library/LaunchAgents/com.limit-resume-concierge.plist
 rm ~/.claude/hooks/limit-interrupted.sh ~/.claude/hooks/concierge-resume.sh ~/.claude/hooks/concierge-sweep.sh
-rm -f ~/.claude/limit-interrupted.jsonl ~/.claude/limit-reset-at ~/.claude/stopfailure-raw.log ~/.claude/concierge-sweep.log
+rm -f ~/.claude/limit-interrupted.jsonl ~/.claude/limit-reset-at ~/.claude/stopfailure-raw.log ~/.claude/concierge-sweep.log ~/.claude/concierge-auth-alerted
 ```
 
 Then remove the `StopFailure` block the installer added in `~/.claude/settings.json` (or restore the `.bak`). If you're coming from v1, also delete the `limit-resume-concierge` scheduled task in the app and the five v1 `permissions.allow` rules.
