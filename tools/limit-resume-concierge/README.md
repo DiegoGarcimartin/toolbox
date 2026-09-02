@@ -6,15 +6,19 @@ When you hit Claude Code's 5h usage limit with several sessions working, they al
 
 ```
 usage limit ──▶ StopFailure hook ──▶ records each session in ~/.claude/limit-interrupted.jsonl
-                                       (dedupe: 1 line per session + parsed reset time)
+                                       (1 line per session + 1 line per killed subagent, under
+                                        its parent's session id; dedupe; parsed reset time)
 
 every 5 min ──▶ launchd runs concierge-sweep.sh (plain bash, no LLM, no app)
                       │  manifest empty → exit (free)
                       │  reset time still in the future → exit (free)
                       │  quota probe rejected → retry next tick (free)
+                      │  session already revived by the desktop app → leave it alone
                       └─▶ quota back → for each session: claude --resume <uuid> -p
-                          "continue where you left off", launched from the session's
-                          own cwd, detached; its line is removed right after (crash-safe)
+                          "continue where you left off" (+ the list of subagents killed
+                          by the limit, which the parent must re-drive), launched from
+                          the session's own cwd, detached; its lines are removed right
+                          after (crash-safe)
 ```
 
 Two moving pieces, both deterministic:
@@ -32,7 +36,7 @@ Requirements: macOS, Claude Code **desktop app** (its sessions are what get reco
 ./install.sh
 ```
 
-That's the whole install: scripts copied, hook configured, launchd agent loaded. No manual steps, no permission rules, no scheduled tasks to create. The installer verifies the CLI and its login, and prints a self-test you can run immediately. `./test.sh` runs the tool's own tests in a sandboxed `$HOME` (no real API call).
+That's the whole install: scripts copied, hook configured, launchd agent loaded. No manual steps, no permission rules, no scheduled tasks to create. The installer verifies the CLI and its login, and prints a self-test you can run immediately. `./test.sh` runs the tool's own tests in a sandboxed `$HOME` (no real API call), including a replay of a subagent's 429 payload through the hook and a sweep against the resulting manifest.
 
 ## Why launchd and not the app's scheduled tasks
 
@@ -44,10 +48,21 @@ v1 orchestrated the recovery with a desktop-app scheduled task running a Claude 
 
 The lesson generalizes: **keep the LLM out of the recovery loop**. Everything the concierge does is deterministic — read a file, resume a session, delete a line — so v2 does it in bash under launchd, where idle ticks are free, nothing prompts, nothing deadlocks, and the desktop app doesn't even need to be open overnight. The LLM appears exactly once: *inside* each resumed session, doing the work you actually wanted finished.
 
+## Subagents killed by the limit
+
+A session running several subagents (the Agent tool) usually does not die alone: each subagent's API call fails with HTTP 429 too, and **subagents never resume on their own**. Their transcripts persist (`~/.claude/projects/<project>/<session>/subagents/agent-<id>.jsonl`), but only the parent session can revive one, with `SendMessage` to its agentId or a relaunch.
+
+The hook sees these deaths: Claude Code fires a `StopFailure` for each subagent, with `agent_id`/`agent_type` in the payload and the **parent's** `session_id` (verified against real payloads and the [hooks reference](https://code.claude.com/docs/en/hooks#stopfailure); `SubagentStop` does not fire on API errors). The hook records one line per subagent under its parent, with the agent's type, its description and the path to its transcript, and rewrites the line's cwd from the agent's throwaway worktree to the parent's cwd (read from the parent transcript).
+
+The sweep groups the manifest by session and resumes the parent **once**, with a message that names each dead subagent, its last line before dying and where its transcript is, and asks the parent to check whether it already finished before re-sending it its last instruction (or relaunching it), shutting down any iOS simulator it left booted first. If the parent itself died too, the message also carries the usual "continue where you left off".
+
+**Known limit:** the concierge cannot resume a subagent directly — there is no CLI entry point into a subagent's transcript. All it can do is tell the parent. And it can only tell a parent it resumes headless: a parent that is alive in the app already holds the subagents' failure notifications in its own context, and is left to deal with them.
+
 ## Design decisions (learned from real failures)
 
 - **Deliver first, clean immediately after, session by session.** If the sweep dies mid-pass, everything already delivered is gone from the manifest and won't be re-sent; everything else survives for the next tick.
-- **Dedupe in the hook.** A single limit event fires one StopFailure per interrupted subagent: one session generated 316 lines. The hook won't record a session already in the manifest.
+- **Dedupe in the hook, by (session, subagent).** A single limit event fires one StopFailure per interrupted subagent, and each one can fire more than once: one session generated 316 lines before dedupe. The hook records each session once and each of its dead subagents once.
+- **A session the app already revived is left alone.** Since desktop 2.1.258 the app can revive an interrupted session by itself once the limit resets (it appends a synthetic "Continue from where you left off." turn). On 2026-09-02 the sweep resumed such a session headless one minute after the app had, and both copies ran the same builds on the same transcript. The sweep now checks the parent transcript for an app revival newer than the limit hit and, if it finds one, drops the session's lines without resuming — that live session already has everything it needs, including the subagents' failure notifications.
 - **Self-guard.** The sweep's own quota probe is the one session that dies from the limit by design, every tick; its prompt carries a marker and the hook never records it. A resumed work session that hits the limit again *is* recorded again, on purpose: it still has work pending. (An earlier version checked for a string the sweep never wrote, so the guard was dead code — caught in review, covered by `test.sh` now.)
 - **Non-quota failures are ignored.** Auth, billing, invalid_request… no point reviving those: they'd fail again.
 - **Resume from the session's own cwd.** `claude --resume` only finds sessions of the current directory's project — the manifest records each session's cwd precisely so the sweep can `cd` there first (found live in a drill: resuming from anywhere else fails with "No conversation found").
@@ -64,6 +79,8 @@ The lesson generalizes: **keep the LLM out of the recovery loop**. Everything th
 - **A resume that fails is not retried.** The resume is launched detached and its manifest line is removed at once (that is what makes the pass crash-safe). If `claude --resume` then fails — session pruned, cwd deleted or renamed, CLI updated mid-flight — the only trace is the error in that session's `~/.claude/concierge-resume-<uuid>.log`; the sweep log just says `resuming`. Reopen the session from the app in that case.
 - The Mac must be awake (plugged in, lid open or caffeinated). The desktop app, however, can be closed.
 - Sweeps handle 5 sessions per tick; more simply roll over to the next tick.
+- **Subagents cannot be resumed by the concierge.** It can only list them to the parent it resumes, with their last line and transcript path; the parent does the re-sending. If the parent was revived by the desktop app instead, nothing is sent at all — that session already saw the failures.
+- **The app-revival check is a heuristic on the transcript.** It looks for the app's synthetic "Continue from where you left off." turn after the limit hit. If the app revives a session some other way, the sweep will still resume it headless, and the two copies will overlap as they did before this check existed.
 
 ## Uninstall
 

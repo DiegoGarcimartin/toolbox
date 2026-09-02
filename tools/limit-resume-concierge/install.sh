@@ -78,4 +78,7 @@ Quick test:
   cat ~/.claude/limit-interrupted.jsonl     # entry with resets_at parsed to ISO
   bash ~/.claude/hooks/concierge-sweep.sh   # drops the test- entry, logs the pass
   tail -2 ~/.claude/concierge-sweep.log
+A subagent killed by the limit is recorded under its parent session (agent_id set):
+  echo '{"session_id":"test-1","agent_id":"a1","agent_type":"Explore","cwd":"/tmp","hook_event_name":"StopFailure","error":"rate_limit","last_assistant_message":"resets 2:40pm"}' | ~/.claude/hooks/limit-interrupted.sh
+  cat ~/.claude/limit-interrupted.jsonl     # one line per (session, subagent)
 EOF

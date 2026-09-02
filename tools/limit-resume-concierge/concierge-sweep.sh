@@ -3,10 +3,16 @@
 #
 # No LLM, no desktop app in the loop: reads the manifest the StopFailure hook
 # writes, resumes each interrupted session headless (claude --resume -p) and
-# removes its line. An empty manifest exits immediately: idle ticks are free.
+# removes its lines. An empty manifest exits immediately: idle ticks are free.
 #
-# Crash-safe like the v1 skill: lines are removed one by one, right after
-# their resume is LAUNCHED — never all at once at the end.
+# The manifest holds one line per interrupted main session and one line per
+# interrupted subagent (same session_id as its parent, plus agent_id). Lines
+# are grouped by session: the parent is resumed ONCE, with a message that
+# lists the subagents killed by the limit — they never resume on their own,
+# only the parent can re-drive them (SendMessage to the agentId, or relaunch).
+#
+# Crash-safe like the v1 skill: a session's lines are removed right after its
+# resume is LAUNCHED — never all at once at the end.
 set -u
 MANIFEST="$HOME/.claude/limit-interrupted.jsonl"
 LOCK="$HOME/.claude/limit-resume-concierge.lock"
@@ -39,14 +45,27 @@ if grep -q '"session_id":"test-' "$MANIFEST" 2>/dev/null; then
   [ -s "$MANIFEST" ] || { log "manifest empty after test cleanup"; exit 0; }
 fi
 
+# ISO-8601 → epoch, BSD date (macOS) first, GNU date (Linux) as fallback.
+# Accepts "2026-09-02T19:02:27+02:00" and "2026-09-02T17:55:35.790Z".
+to_epoch() {
+  local s e=""
+  s=$(echo "$1" | sed -E 's/\.[0-9]+//')
+  case "$s" in
+    *Z) e=$(date -j -u -f "%Y-%m-%dT%H:%M:%S" "${s%Z}" +%s 2>/dev/null) ;;
+    *)  s=$(echo "$s" | sed -E 's/([+-][0-9]{2}):([0-9]{2})$/\1\2/')
+        e=$(date -j -f "%Y-%m-%dT%H:%M:%S%z" "$s" +%s 2>/dev/null) ;;
+  esac
+  [ -n "$e" ] || e=$(date -d "$1" +%s 2>/dev/null)
+  echo "$e"
+}
+
 # If the manifest carries a reset time that is still in the future, don't even
 # probe: quota is known to be exhausted until then. (Free early exit.) Only
 # trusted up to 5h ahead — the limit window is 5h, so anything further is a
 # mis-parsed timezone and would wrongly hold every pending session.
 latest_reset=$(jq -rs '[.[] | .resets_at // empty] | max // empty' "$MANIFEST" 2>/dev/null)
 if [ -n "$latest_reset" ]; then
-  reset_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S" "${latest_reset%%[+Z]*}" +%s 2>/dev/null \
-    || date -d "$latest_reset" +%s 2>/dev/null)
+  reset_epoch=$(to_epoch "$latest_reset")
   now=$(date +%s)
   if [ -n "$reset_epoch" ] && [ "$reset_epoch" -gt "$now" ] && [ $((reset_epoch - now)) -le 18000 ]; then
     log "reset expected at $latest_reset; waiting"
@@ -76,6 +95,66 @@ if ! echo "$probe" | jq -e '.is_error == false' >/dev/null 2>&1; then
 fi
 rm -f "$AUTH_MARK"
 
+# Last thing a subagent said before dying (its transcript persists after the
+# agent ends). One line, capped, so the parent can recognise where it was. The
+# limit message itself ("You've hit your session limit · resets 7:40pm") is
+# written to the agent transcript as its final assistant text: skip it.
+agent_last_line() {
+  [ -f "$1" ] || { echo "(transcript not found)"; return; }
+  tail -n 300 "$1" | jq -r '
+    select(.type == "assistant" and .message.content != null) | .message.content
+    | if type == "array" then map(select(.type == "text") | .text) | join(" ") else tostring end' 2>/dev/null \
+    | grep -v '^$' | grep -viE "hit your .*limit|usage limit|resets? (at )?[0-9]{1,2}(:[0-9]{2})? ?(am|pm)" \
+    | tail -1 | tr '\n' ' ' | cut -c1-240
+}
+
+# Build the resume message for one session from its manifest lines ($1 = the
+# lines, newline-separated). Main-session-only → the legacy message, verbatim.
+# With subagents → the list, plus the legacy sentence when the parent died too.
+build_message() {
+  local lines="$1" parent_dead agents n
+  parent_dead=$(echo "$lines" | jq -r 'select((.agent_id // "") == "") | .session_id' 2>/dev/null | head -1)
+  agents=$(echo "$lines" | jq -r 'select((.agent_id // "") != "") | .agent_id' 2>/dev/null)
+  if [ -z "$agents" ]; then echo "$MSG"; return; fi
+
+  n=$(echo "$agents" | grep -c .)
+  local out="[Automatic message from the limit concierge] Resuming after the usage limit."
+  [ -n "$parent_dead" ] && out="$out Continue exactly where you left off with the task you had in progress when the limit hit."
+  out="$out The following $n subagent(s) of this session were killed by the limit (HTTP 429) and do NOT resume on their own:"
+  local aid atype adesc atp last
+  while IFS= read -r aid; do
+    [ -n "$aid" ] || continue
+    atype=$(echo "$lines" | jq -r --arg a "$aid" 'select(.agent_id == $a) | .agent_type // "agent"' 2>/dev/null | head -1)
+    adesc=$(echo "$lines" | jq -r --arg a "$aid" 'select(.agent_id == $a) | .agent_description // empty' 2>/dev/null | head -1)
+    atp=$(echo "$lines" | jq -r --arg a "$aid" 'select(.agent_id == $a) | .agent_transcript // empty' 2>/dev/null | head -1)
+    last=$(agent_last_line "$atp" | tr '"' "'")
+    adesc=$(echo "$adesc" | tr '"' "'")
+    out="$out
+- agentId $aid ($atype${adesc:+, \"$adesc\"}) — last line before dying: \"${last:-(no text yet)}\"${atp:+ — transcript: $atp}"
+  done <<< "$agents"
+  out="$out
+For each of them: check its transcript first — if it already finished or was already resumed, leave it alone. Otherwise re-send it its last instruction with SendMessage to its agentId, or relaunch it. If any of them left an iOS simulator booted (xcrun simctl list devices booted), shut it down and delete it before relaunching. Then continue with the task in progress."
+  echo "$out"
+}
+
+# The desktop app can revive an interrupted session by itself once the limit
+# resets (it appends a synthetic "Continue from where you left off." turn with
+# entrypoint claude-desktop). Resuming that session headless on top of it runs
+# the same work twice on the same transcript (seen live on 2026-09-02). If the
+# parent transcript shows such a revival AFTER the limit hit, skip our resume:
+# that live session already holds the subagents' failure notifications.
+app_revived_at() {  # $1 = transcript, $2 = epoch of the latest limit hit; prints the revival timestamp or nothing
+  [ -f "$1" ] || return 0
+  local cut="$2" ts e
+  [ -n "$cut" ] || return 0
+  ts=$(grep '"entrypoint":"claude-desktop"' "$1" | grep '"isMeta":true' | grep 'Continue from where you left off' \
+    | grep -o '"timestamp":"[^"]*"' | tail -1 | cut -d'"' -f4)
+  [ -n "$ts" ] || return 0
+  e=$(to_epoch "$ts"); [ -n "$e" ] || return 0
+  [ "$e" -gt "$cut" ] && echo "$ts"
+  return 0
+}
+
 # Sweep: up to 5 sessions per pass (self-guard and dedupe already happen in
 # the StopFailure hook; test- entries are dropped here without resuming).
 # Order per session: launch the resume, THEN remove its lines — if the script
@@ -83,7 +162,7 @@ rm -f "$AUTH_MARK"
 # $2 is the head line being processed: if the literal match fails to remove it
 # (non-compact JSON, e.g. hand-edited), drop it by position so the loop can't spin.
 drop_sid() {
-  grep -v "\"session_id\":\"$1\"" "$MANIFEST" > "$MANIFEST.tmp"; mv "$MANIFEST.tmp" "$MANIFEST"
+  grep -vF "\"session_id\":\"$1\"" "$MANIFEST" > "$MANIFEST.tmp"; mv "$MANIFEST.tmp" "$MANIFEST"
   if [ "$(head -n1 "$MANIFEST" 2>/dev/null)" = "$2" ]; then
     tail -n +2 "$MANIFEST" > "$MANIFEST.tmp"; mv "$MANIFEST.tmp" "$MANIFEST"
     log "dropped head line by position (literal match failed for $1)"
@@ -97,7 +176,6 @@ while [ "$processed" -lt 5 ]; do
   line=$(head -n1 "$MANIFEST" 2>/dev/null)
   [ -n "$line" ] || break
   sid=$(echo "$line" | jq -r '.session_id // empty' 2>/dev/null)
-  dir=$(echo "$line" | jq -r '.cwd // empty' 2>/dev/null)
 
   if [ -z "$sid" ]; then
     tail -n +2 "$MANIFEST" > "$MANIFEST.tmp"; mv "$MANIFEST.tmp" "$MANIFEST"
@@ -106,8 +184,34 @@ while [ "$processed" -lt 5 ]; do
   fi
   case "$sid" in test-*) drop_sid "$sid" "$line"; log "dropped test entry $sid"; continue;; esac
 
-  log "resuming $sid (cwd: $dir)"
-  "$HOME/.claude/hooks/concierge-resume.sh" "$sid" "$dir" "$MSG"
+  # All lines of this session: the main-session line (if it died) and one per
+  # dead subagent. cwd: the main-session line's, else the first line's (the
+  # hook already rewrote a subagent line's cwd to the parent's when it could).
+  # (normalised through jq so one unparsable line cannot abort the group's jq calls)
+  lines=$(grep -F "\"session_id\":\"$sid\"" "$MANIFEST" | jq -Rc 'fromjson? | select(type == "object")' 2>/dev/null)
+  dir=$(echo "$lines" | jq -r 'select((.agent_id // "") == "") | .cwd // empty' 2>/dev/null | head -1)
+  [ -n "$dir" ] || dir=$(echo "$lines" | jq -r '.cwd // empty' 2>/dev/null | head -1)
+  tp=$(echo "$lines" | jq -r '.transcript_path // empty' 2>/dev/null | head -1)
+  agents=$(echo "$lines" | jq -r 'select((.agent_id // "") != "") | .agent_id' 2>/dev/null | tr '\n' ' ')
+  # Latest limit hit in the group, as an epoch: a fresh death must never be
+  # hidden behind an older app revival.
+  latest_hit=""
+  while IFS= read -r l; do
+    [ -n "$l" ] || continue
+    e=$(to_epoch "$l"); [ -n "$e" ] || continue
+    [ -z "$latest_hit" ] || [ "$e" -gt "$latest_hit" ] && latest_hit="$e"
+  done <<< "$(echo "$lines" | jq -r '.logged_at // empty' 2>/dev/null)"
+
+  revived=$(app_revived_at "$tp" "$latest_hit")
+  if [ -n "$revived" ]; then
+    log "skipping $sid: the desktop app already revived it at $revived${agents:+ (dead subagents left to that live session: $agents)}"
+    drop_sid "$sid" "$line"
+    continue
+  fi
+
+  msg=$(build_message "$lines")
+  log "resuming $sid (cwd: $dir)${agents:+ with dead subagents: $agents}"
+  "$HOME/.claude/hooks/concierge-resume.sh" "$sid" "$dir" "$msg"
   drop_sid "$sid" "$line"
   processed=$((processed+1))
 done
