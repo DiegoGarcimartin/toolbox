@@ -1,8 +1,10 @@
 #!/bin/bash
 # Tests for the sweep, the StopFailure hook and the live-session notifier (v3).
 # Sandboxes HOME, stubs osascript and the claude CLI, injects the quota probe
-# via CONCIERGE_TEST_PROBE. No real API call, no real session, no socket
-# outside the sandbox.
+# via CONCIERGE_TEST_PROBE (one fixed answer) or CONCIERGE_TEST_PROBE_SEQ (a
+# file, one answer per probe). The sweep's timing knobs default to zero here
+# (no hold, no retry, no margin) unless a test sets them. No real API call, no
+# real session, no socket outside the sandbox.
 set -u
 DIR="$(cd "$(dirname "$0")" && pwd)"
 SWEEP="$DIR/concierge-sweep.sh"
@@ -90,10 +92,18 @@ new_home() {  # fresh sandbox HOME with a one-session manifest and both helpers
   echo "$h"
 }
 
-run_sweep() {  # $1=home $2=probe json; killed after 10s so a spinning loop fails instead of hanging
+run_sweep() {  # $1=home $2=probe json ("" with CONCIERGE_TEST_PROBE_SEQ); killed after 10s so a spinning loop fails instead of hanging
   HOME="$1" OSA_LOG="$1/osascript.log" CLAUDE_STUB_LOG="$1/claude-stub" CONCIERGE_TEST_PROBE="$2" PATH="$TMP/bin:$PATH" \
+    CONCIERGE_PROBE_WINDOW="${CONCIERGE_PROBE_WINDOW-0}" CONCIERGE_PROBE_INTERVAL="${CONCIERGE_PROBE_INTERVAL-0}" \
+    CONCIERGE_RESET_MARGIN="${CONCIERGE_RESET_MARGIN-0}" \
     perl -e 'alarm 10; exec @ARGV' bash "$SWEEP" >/dev/null 2>&1
   sleep 1  # the resume is launched detached; give the stub time to write
+}
+
+probe_seq() {  # $1=home, then one probe answer per argument → the file for CONCIERGE_TEST_PROBE_SEQ
+  local f="$1/probe-seq"; shift
+  printf '%s\n' "$@" > "$f"
+  echo "$f"
 }
 
 run_hook() {  # $1=home, payload on stdin
@@ -146,6 +156,12 @@ mkdir "$H/.claude/limit-resume-concierge.lock"
 run_sweep "$H" "$QUOTA_PROBE"
 check "fresh lock still skips the tick" \
   "grep -q 'another sweep is still running' '$H/.claude/concierge-sweep.log' 2>/dev/null"
+H=$(new_home t6b)
+mkdir "$H/.claude/limit-resume-concierge.lock"
+touch -t "$(date -v-12M +%Y%m%d%H%M)" "$H/.claude/limit-resume-concierge.lock"
+run_sweep "$H" "$QUOTA_PROBE"
+check "a 12-minute-old lock (a sweep holding for the reset) is NOT stale: the tick skips" \
+  "grep -q 'another sweep is still running' '$H/.claude/concierge-sweep.log' 2>/dev/null && [ -d '$H/.claude/limit-resume-concierge.lock' ]"
 
 echo "# sweep: manifest lines the literal grep cannot remove"
 H=$(new_home t7)
@@ -186,6 +202,45 @@ echo "{\"session_id\":\"p1\",\"agent_id\":\"a1\",\"cwd\":\"/tmp\",\"resets_at\":
 run_sweep "$H" "$QUOTA_PROBE"
 check "the reset time is read from the AGENTS manifest too" \
   "grep -q 'reset expected' '$H/.claude/concierge-sweep.log' 2>/dev/null"
+
+echo "# sweep: wake-up timing (v3.1) — hold for a near reset, retry inside the tick, parse the probe"
+H=$(new_home t9c)
+soon=$(date -v+2S -Iseconds)
+echo "{\"session_id\":\"fake-1\",\"cwd\":\"/tmp\",\"resets_at\":\"$soon\"}" > "$H/.claude/limit-interrupted.jsonl"
+run_sweep "$H" "$OK_PROBE"
+check "reset less than a tick away: the sweep HOLDS instead of exiting, then wakes the session" \
+  "grep -q 'holding this tick' '$H/.claude/concierge-sweep.log' && ! grep -q '; waiting' '$H/.claude/concierge-sweep.log' && [ \"\$(cat '$H/claude-stub.sid' 2>/dev/null)\" = fake-1 ]"
+H=$(new_home t9d)
+soon=$(date -v+2S -Iseconds)
+echo "{\"session_id\":\"fake-1\",\"cwd\":\"/tmp\",\"resets_at\":\"$soon\"}" > "$H/.claude/limit-interrupted.jsonl"
+run_sweep "$H" "$QUOTA_PROBE"
+check "held tick whose probe is still rejected: logged as quota not back, session kept" \
+  "grep -q 'holding this tick' '$H/.claude/concierge-sweep.log' && grep -q 'quota not back yet' '$H/.claude/concierge-sweep.log' && grep -q fake-1 '$H/.claude/limit-interrupted.jsonl'"
+H=$(new_home t9e)
+SEQ=$(probe_seq "$H" "$QUOTA_PROBE" "$QUOTA_PROBE" "$OK_PROBE")
+CONCIERGE_TEST_PROBE_SEQ="$SEQ" CONCIERGE_PROBE_WINDOW=5 run_sweep "$H" ""
+check "a rejected probe is retried inside the same tick and the session is woken on the third" \
+  "grep -q 'retrying every 0s for up to 5s' '$H/.claude/concierge-sweep.log' && grep -q 'quota back (probe 3 accepted)' '$H/.claude/concierge-sweep.log' && [ \"\$(cat '$H/claude-stub.sid' 2>/dev/null)\" = fake-1 ]"
+check "the rejection reason is logged verbatim" \
+  "grep -q 'probe rejected: 5-hour limit reached, resets 7pm' '$H/.claude/concierge-sweep.log'"
+H=$(new_home t9f)
+CONCIERGE_PROBE_WINDOW=3 CONCIERGE_PROBE_INTERVAL=1 run_sweep "$H" "$QUOTA_PROBE"; rc=$?
+check "probes keep failing: the tick gives up when its window closes (not killed), session kept" \
+  "[ $rc -eq 0 ] && grep -q 'will retry next tick' '$H/.claude/concierge-sweep.log' && grep -q fake-1 '$H/.claude/limit-interrupted.jsonl'"
+H=$(new_home t9g)
+SEQ=$(probe_seq "$H" 'Update available: 9.9.9\n{"type":"result","is_error":false,"result":"ok","session_id":"x"}\nsome trailing notice')
+CONCIERGE_TEST_PROBE_SEQ="$SEQ" run_sweep "$H" ""
+check "the result object is found among extra stdout lines (no more tail -1): accepted" \
+  "[ \"\$(cat '$H/claude-stub.sid' 2>/dev/null)\" = fake-1 ] && ! grep -q 'quota not back yet' '$H/.claude/concierge-sweep.log'"
+H=$(new_home t9h)
+SEQ=$(probe_seq "$H" "<empty>" "$OK_PROBE")
+CONCIERGE_TEST_PROBE_SEQ="$SEQ" CONCIERGE_PROBE_WINDOW=5 run_sweep "$H" ""
+check "an empty probe output is logged as unparsable and retried, not treated as a dead end" \
+  "grep -q 'no result object in the probe output: (empty)' '$H/.claude/concierge-sweep.log' && [ \"\$(cat '$H/claude-stub.sid' 2>/dev/null)\" = fake-1 ]"
+H=$(new_home t9i)
+CONCIERGE_PROBE_WINDOW=5 run_sweep "$H" '{"is_error":true,"result":"Not logged in · Please run /login"}'
+check "'Not logged in' is an auth failure: notified once, no retry loop, session kept" \
+  "grep -q 'CLI logged out' '$H/.claude/concierge-sweep.log' && ! grep -q 'quota not back yet' '$H/.claude/concierge-sweep.log' && [ \$(wc -l < '$H/osascript.log') -eq 1 ] && grep -q fake-1 '$H/.claude/limit-interrupted.jsonl'"
 
 echo "# sweep: main session only (legacy message, unchanged)"
 H=$(new_home t10)

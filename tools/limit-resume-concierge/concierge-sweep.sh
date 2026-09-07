@@ -5,6 +5,13 @@
 # writes, wakes each interrupted session and removes its lines. An empty
 # manifest exits immediately: idle ticks are free.
 #
+# Timing (v3.1): the announced reset hour is minute-precise and the real reset
+# can lag it a little, so a tick that sees the reset less than one interval
+# away HOLDS and probes right after it, and after the reset a rejected probe is
+# retried every PROBE_INTERVAL seconds for PROBE_WINDOW seconds inside the same
+# tick. Before, one probe per tick: a limit that lifted at 17:40 was noticed at
+# 17:45 at best, and one rejected (or unparsable) probe cost 5 more minutes.
+#
 # Two manifests (v3):
 #   ~/.claude/limit-interrupted.jsonl         one line per interrupted MAIN session
 #   ~/.claude/limit-interrupted-agents.jsonl  one line per SUBAGENT killed by the
@@ -34,15 +41,20 @@ SWEEPLOG="$HOME/.claude/concierge-sweep.log"
 NOTIFY="$HOME/.claude/hooks/concierge-notify.sh"
 RESUME="$HOME/.claude/hooks/concierge-resume.sh"
 MSG="[Automatic message from the limit concierge] The usage limit has recovered. Continue exactly where you left off with the task you had in progress when the limit hit. If nothing was in progress, reply briefly that there is nothing pending and do nothing else."
+TICK=300                                        # launchd StartInterval, seconds
+PROBE_INTERVAL=${CONCIERGE_PROBE_INTERVAL:-30}   # seconds between probes once the reset has passed
+PROBE_WINDOW=${CONCIERGE_PROBE_WINDOW:-240}      # how long one tick keeps probing after the reset
+RESET_MARGIN=${CONCIERGE_RESET_MARGIN:-5}        # seconds past the announced reset before the first probe
 
 [ -s "$MANIFEST" ] || [ -s "$AGENTS" ] || exit 0
 
 log() { echo "$(date -Iseconds) $*" >> "$SWEEPLOG"; }
 
-# Single-instance guard. A sweep takes seconds (wake-ups are launched
-# detached), so a lock older than 10 min is a crash/reboot leftover: clear it
-# instead of skipping every tick forever.
-if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
+# Single-instance guard. Wake-ups are launched detached, but a sweep can hold
+# for the reset (up to one tick) and then probe for PROBE_WINDOW more seconds:
+# about 10 minutes at most. A lock older than 20 min is a crash/reboot
+# leftover: clear it instead of skipping every tick forever.
+if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +20 2>/dev/null)" ]; then
   rmdir "$LOCK" 2>/dev/null && log "cleared stale lock left by an interrupted sweep"
 fi
 if ! mkdir "$LOCK" 2>/dev/null; then
@@ -81,40 +93,89 @@ to_epoch() {
   echo "$e"
 }
 
-# If the manifests carry a reset time that is still in the future, don't even
-# probe: quota is known to be exhausted until then. (Free early exit.) Only
-# trusted up to 5h ahead — the limit window is 5h, so anything further is a
-# mis-parsed timezone and would wrongly hold every pending session.
+# If the manifests carry a reset time that is still in the future, don't
+# probe: quota is known to be exhausted until then. Only trusted up to 5h ahead
+# — the limit window is 5h, so anything further is a mis-parsed timezone and
+# would wrongly hold every pending session. A reset more than a tick away is
+# left to a later tick (free exit); one that lands before the next tick is
+# waited for HERE, so the first probe runs seconds after it, not minutes.
 latest_reset=$(all_lines | jq -Rrs '[split("\n")[] | fromjson? | .resets_at // empty] | max // empty' 2>/dev/null)
 if [ -n "$latest_reset" ]; then
   reset_epoch=$(to_epoch "$latest_reset")
   now=$(date +%s)
   if [ -n "$reset_epoch" ] && [ "$reset_epoch" -gt "$now" ] && [ $((reset_epoch - now)) -le 18000 ]; then
-    log "reset expected at $latest_reset; waiting"
-    exit 0
+    hold=$((reset_epoch + RESET_MARGIN - now))
+    if [ "$hold" -gt $((TICK + RESET_MARGIN)) ]; then
+      log "reset expected at $latest_reset; waiting"
+      exit 0
+    fi
+    log "reset expected at $latest_reset; holding this tick ${hold}s to probe right after it"
+    sleep "$hold"
   fi
 fi
 
 # Quota probe: one minimal headless call. While the limit is active this call
-# is rejected (and costs nothing); the sweep retries on the next tick.
-# The prompt carries a marker so the StopFailure hook never records the probe
-# itself. CONCIERGE_TEST_PROBE lets tests inject a canned probe result.
-probe=${CONCIERGE_TEST_PROBE:-$(claude -p "[limit-resume-concierge probe] Reply with exactly: ok" --output-format json 2>/dev/null | tail -1)}
+# is rejected (and costs nothing). The prompt carries a marker so the StopFailure
+# hook never records the probe itself. Tests inject the probe's stdout with
+# CONCIERGE_TEST_PROBE (the same answer every time) or CONCIERGE_TEST_PROBE_SEQ
+# (a file, one answer per line, consumed in order; "\n" inside a line stands
+# for a line break, the line "<empty>" for no output at all).
+run_probe() {
+  if [ -n "${CONCIERGE_TEST_PROBE_SEQ:-}" ] && [ -s "$CONCIERGE_TEST_PROBE_SEQ" ]; then
+    local first; first=$(head -n 1 "$CONCIERGE_TEST_PROBE_SEQ")
+    tail -n +2 "$CONCIERGE_TEST_PROBE_SEQ" > "$CONCIERGE_TEST_PROBE_SEQ.tmp"; mv "$CONCIERGE_TEST_PROBE_SEQ.tmp" "$CONCIERGE_TEST_PROBE_SEQ"
+    [ "$first" = "<empty>" ] || printf '%b\n' "$first"
+    return
+  fi
+  if [ -n "${CONCIERGE_TEST_PROBE:-}" ]; then printf '%s\n' "$CONCIERGE_TEST_PROBE"; return; fi
+  claude -p "[limit-resume-concierge probe] Reply with exactly: ok" --output-format json 2>/dev/null
+}
+
+# The probe's verdict is the LAST line of its stdout that parses as a result
+# object ({"type":"result",…} — or a bare {"is_error":…} from the tests),
+# wherever the CLI puts it. `tail -1` used to decide: on 2026-09-07 a probe the
+# model had answered "ok" was read as rejected, and a limit that had lifted on
+# time was noticed eight minutes later, by hand.
+probe_result() {
+  printf '%s\n' "$1" | jq -Rc 'fromjson? | select(type == "object" and (has("is_error") or .type == "result"))' 2>/dev/null | tail -1
+}
+
 AUTH_MARK="$HOME/.claude/concierge-auth-alerted"
-if ! echo "$probe" | jq -e '.is_error == false' >/dev/null 2>&1; then
+deadline=$(( $(date +%s) + PROBE_WINDOW ))
+attempt=0
+while :; do
+  attempt=$((attempt+1))
+  raw=$(run_probe)
+  res=$(probe_result "$raw")
+  if [ -n "$res" ] && printf '%s' "$res" | jq -e '.is_error == false' >/dev/null 2>&1; then
+    [ "$attempt" -gt 1 ] && log "quota back (probe $attempt accepted)"
+    break
+  fi
+  if [ -n "$res" ]; then
+    why=$(printf '%s' "$res" | jq -r '.result // .error // "rejected without a message"' 2>/dev/null | tr '\n' ' ' | cut -c1-200)
+  elif [ -n "$raw" ]; then
+    why="no result object in the probe output: $(printf '%s' "$raw" | tr '\n' ' ' | cut -c1-200)"
+  else
+    why="no result object in the probe output: (empty)"
+  fi
   # A logged-out CLI rejects the probe exactly like an exhausted quota, but no
   # amount of waiting fixes it — tell the user once instead of retrying silently.
-  if echo "$probe" | jq -r '.result // empty' 2>/dev/null | grep -qiE 'authenticat|oauth|api key'; then
-    log "CLI logged out, not a quota wait: $(echo "$probe" | jq -r '.result')"
+  if printf '%s' "$why" | grep -qiE 'authenticat|oauth|api key|not logged in|/login'; then
+    log "CLI logged out, not a quota wait: $why"
     if [ ! -e "$AUTH_MARK" ]; then
       : > "$AUTH_MARK"
       osascript -e 'display notification "The claude CLI is logged out; interrupted sessions cannot resume. Run claude in a terminal and /login once." with title "limit-resume-concierge"' 2>/dev/null
     fi
-  else
-    log "quota not back yet (probe rejected); will retry next tick"
+    exit 0
   fi
-  exit 0
-fi
+  now=$(date +%s)
+  if [ $((now + PROBE_INTERVAL)) -ge "$deadline" ]; then
+    log "quota not back yet (probe $attempt rejected: $why); will retry next tick"
+    exit 0
+  fi
+  [ "$attempt" -eq 1 ] && log "quota not back yet (probe rejected: $why); retrying every ${PROBE_INTERVAL}s for up to ${PROBE_WINDOW}s"
+  sleep "$PROBE_INTERVAL"
+done
 rm -f "$AUTH_MARK"
 
 # Last thing a subagent said before dying (its transcript persists after the
