@@ -8,11 +8,13 @@
 # Other failures (auth, billing, invalid_request) are ignored: not worth resuming.
 #
 # Behavior:
-#  - One line per interrupted MAIN session (no agent_id in the payload) and one
-#    line per interrupted SUBAGENT (payload carries agent_id/agent_type; its
-#    session_id is the PARENT session's). Subagents do not resume on their own:
-#    the sweep hands the list to the parent, which re-drives them (SendMessage
-#    to the agentId, or a relaunch).
+#  - One line per interrupted MAIN session (no agent_id in the payload) in
+#    ~/.claude/limit-interrupted.jsonl, and one line per interrupted SUBAGENT
+#    (payload carries agent_id/agent_type; its session_id is the PARENT
+#    session's) in ~/.claude/limit-interrupted-agents.jsonl (v3), with the
+#    agent's worktree, branch, description and transcript. Subagents do not
+#    resume on their own: the sweep hands the list to the parent, which
+#    re-drives them (relaunch from the same worktree, or SendMessage).
 #  - DEDUPE by (session_id, agent_id): a single limit event can fire hundreds
 #    of StopFailures; each session and each subagent is recorded once.
 #  - resets_at: if the payload carries the reset time as text ("resets 2:40pm"),
@@ -21,6 +23,7 @@
 #    the one session that dies from the limit by design, every tick). Resumed
 #    work sessions that hit the limit again ARE recorded: they have work pending.
 MANIFEST="$HOME/.claude/limit-interrupted.jsonl"
+AGENTS_MANIFEST="$HOME/.claude/limit-interrupted-agents.jsonl"
 RAWLOG="$HOME/.claude/stopfailure-raw.log"
 RESETFILE="$HOME/.claude/limit-reset-at"
 input=$(cat)
@@ -96,14 +99,16 @@ if [ -n "$reset_raw" ]; then
   fi
 fi
 
-# Dedupe by (session_id, agent_id). A main-session line has no agent_id; a
-# subagent line has its own. The literal match relies on the compact key order
-# jq emits below (session_id first, agent_id right after).
-if [ -n "$sid" ] && [ -f "$MANIFEST" ]; then
+# Which manifest: a main-session line goes to $MANIFEST, a subagent line to
+# $AGENTS_MANIFEST (v3). Dedupe by (session_id, agent_id) within that file. The
+# literal match relies on the compact key order jq emits below (session_id
+# first, agent_id right after).
+if [ -n "$aid" ]; then target="$AGENTS_MANIFEST"; else target="$MANIFEST"; fi
+if [ -n "$sid" ] && [ -f "$target" ]; then
   if [ -n "$aid" ]; then
-    grep -qF "\"session_id\":\"$sid\",\"agent_id\":\"$aid\"" "$MANIFEST" && exit 0
+    grep -qF "\"session_id\":\"$sid\",\"agent_id\":\"$aid\"" "$target" && exit 0
   else
-    grep -qF "\"session_id\":\"$sid\",\"agent_id\":null" "$MANIFEST" && exit 0
+    grep -qF "\"session_id\":\"$sid\",\"agent_id\":null" "$target" && exit 0
   fi
 fi
 
@@ -111,24 +116,32 @@ fi
 # that is deleted when the agent ends), so the resume must run from the PARENT
 # session's cwd: the first entry of the parent transcript carries it. The agent's
 # own transcript and metadata live next to the parent transcript; the sweep
-# reads them at resume time (they persist after the agent dies).
-parent_cwd=""; agent_transcript=""; agent_desc=""
+# reads them at wake-up time (they persist after the agent dies). The meta file
+# also names the agent's worktree and branch — the parent must relaunch it from
+# there, where its uncommitted work still sits.
+parent_cwd=""; agent_transcript=""; agent_desc=""; agent_worktree=""; agent_branch=""
 if [ -n "$aid" ]; then
   if [ -n "$tp" ] && [ -f "$tp" ]; then
     parent_cwd=$(head -n 50 "$tp" | jq -Rr 'fromjson? | select(type == "object" and .cwd? and .cwd != "") | .cwd' 2>/dev/null | head -1)
     agent_dir="$(dirname "$tp")/$sid/subagents"
     agent_transcript="$agent_dir/agent-$aid.jsonl"
     agent_desc=$(jq -r '.description // empty' "$agent_dir/agent-$aid.meta.json" 2>/dev/null | head -c 200)
+    agent_worktree=$(jq -r '.worktreePath // empty' "$agent_dir/agent-$aid.meta.json" 2>/dev/null)
+    agent_branch=$(jq -r '.worktreeBranch // empty' "$agent_dir/agent-$aid.meta.json" 2>/dev/null)
   fi
+  # No meta file: the payload's own cwd is the agent's worktree when it is one.
+  [ -n "$agent_worktree" ] || agent_worktree=$(echo "$input" | jq -r '.cwd // empty' 2>/dev/null | grep -E '/\.claude/worktrees/agent-' || true)
 fi
 
 entry=$(echo "$input" | jq -c \
   --arg ts "$(date -Iseconds)" --arg ra "$resets_at" --arg pcwd "$parent_cwd" \
-  --arg atp "$agent_transcript" --arg adesc "$agent_desc" '
+  --arg atp "$agent_transcript" --arg adesc "$agent_desc" --arg awt "$agent_worktree" --arg abr "$agent_branch" '
   {session_id,
    agent_id: (.agent_id // null),
    agent_type: (.agent_type // null),
    agent_description: (if $adesc == "" then null else $adesc end),
+   agent_worktree: (if $awt == "" then null else $awt end),
+   agent_branch: (if $abr == "" then null else $abr end),
    agent_transcript: (if $atp == "" then null else $atp end),
    cwd: (if (.agent_id // "") != "" and $pcwd != "" then $pcwd else .cwd end),
    transcript_path: (.transcript_path // null),
@@ -136,8 +149,8 @@ entry=$(echo "$input" | jq -c \
    resets_at: (if $ra == "" then null else $ra end),
    error: (.error // .error_type // .message // .reason // null)}' 2>/dev/null)
 if [ -n "$entry" ]; then
-  echo "$entry" >> "$MANIFEST"
+  echo "$entry" >> "$target"
 else
-  echo "$input" >> "$MANIFEST"
+  echo "$input" >> "$target"
 fi
 exit 0

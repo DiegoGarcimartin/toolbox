@@ -29,11 +29,13 @@ SETTINGS="$CLAUDE_DIR/settings.json"
 mkdir -p "$CLAUDE_DIR/hooks"
 cp hooks/limit-interrupted.sh "$CLAUDE_DIR/hooks/limit-interrupted.sh"
 cp hooks/concierge-resume.sh  "$CLAUDE_DIR/hooks/concierge-resume.sh"
+cp hooks/concierge-notify.sh  "$CLAUDE_DIR/hooks/concierge-notify.sh"
 cp concierge-sweep.sh         "$CLAUDE_DIR/hooks/concierge-sweep.sh"
 chmod +x "$CLAUDE_DIR/hooks/limit-interrupted.sh" \
          "$CLAUDE_DIR/hooks/concierge-resume.sh" \
+         "$CLAUDE_DIR/hooks/concierge-notify.sh" \
          "$CLAUDE_DIR/hooks/concierge-sweep.sh"
-echo "✓ Hook, resume helper and sweep script in $CLAUDE_DIR/hooks/"
+echo "✓ Hook, resume helper, live-session notifier and sweep script in $CLAUDE_DIR/hooks/"
 
 # 2. settings.json: StopFailure recording hook
 [ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
