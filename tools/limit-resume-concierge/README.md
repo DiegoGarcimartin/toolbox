@@ -41,7 +41,9 @@ Requirements: macOS, Claude Code **desktop app** (its sessions are what get reco
 ./install.sh
 ```
 
-That's the whole install: scripts copied, hook configured, launchd agent loaded. No manual steps, no permission rules, no scheduled tasks to create. The installer verifies the CLI and its login, and prints a self-test you can run immediately. `./test.sh` runs the tool's own tests in a sandboxed `$HOME` (no real API call), including a replay of a subagent's 429 payload through the hook, a sweep that posts into a fake live session's socket, and a sweep that resumes a dead one.
+That's the whole install: scripts copied, hook configured, launchd agent loaded. No permission rules, no scheduled tasks to create. The installer verifies the CLI and its login, and prints a self-test you can run immediately.
+
+It asks **one question**: *do you ever run sessions in `bypassPermissions` mode?* A session in that mode holds a message from a script for your approval and drops it after five minutes, so the concierge's wake-up would never reach it overnight. Answer **yes** and the installer sets `"crossSessionInbound": "accept"` in `~/.claude/settings.json` (every session then delivers messages from your other sessions and scripts without asking); answer **no** and nothing changes, because sessions in `auto`, `default`, `acceptEdits` or `dontAsk` mode already deliver them. If the key is already set, the installer reports its value instead of asking; a value other than `accept` blocks the wake-up and is flagged. For a non-interactive install, answer through the environment: `CONCIERGE_INSTALL_BYPASS=y ./install.sh` (or `=n`); with no terminal and no answer, the key is left unset and a warning tells you how to set it. `./test.sh` runs the tool's own tests in a sandboxed `$HOME` (no real API call), including a replay of a subagent's 429 payload through the hook, a sweep that posts into a fake live session's socket, and a sweep that resumes a dead one.
 
 ## Why launchd and not the app's scheduled tasks
 
